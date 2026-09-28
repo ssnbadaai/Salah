@@ -2,6 +2,7 @@ import Toybox.Application;
 import Toybox.Communications;
 import Toybox.Lang;
 import Toybox.Math;
+import Toybox.PersistedContent;
 import Toybox.Position;
 import Toybox.WatchUi;
 
@@ -97,7 +98,7 @@ class Sync {
         var t = PrayerData.omanInfo(0);
         var y = t.year as Number;
         var m = t.month as Number;
-        if (!has(y, m)) {
+        if (!isCached(y, m)) {
             request(y, m);
             return;
         }
@@ -105,13 +106,13 @@ class Sync {
         if ((t.day as Number) >= 20) {
             var ny = m == 12 ? y + 1 : y;
             var nm = m == 12 ? 1 : m + 1;
-            if (!has(ny, nm)) {
+            if (!isCached(ny, nm)) {
                 request(ny, nm);
             }
         }
     }
 
-    hidden function has(year as Number, month as Number) as Boolean {
+    hidden function isCached(year as Number, month as Number) as Boolean {
         return Application.Storage.getValue(PrayerData.monthKey(cityId, year, month)) != null;
     }
 
@@ -136,7 +137,7 @@ class Sync {
         }, method(:onResponse));
     }
 
-    function onResponse(code as Number, data, key) as Void {
+    function onResponse(code as Number, data as Dictionary or String or PersistedContent.Iterator or Null, key as Object) as Void {
         _busy = false;
         if (code == 200 && data instanceof Dictionary && data["days"] instanceof Array) {
             var got = PrayerData.monthKey(data["city"] as Number, data["year"] as Number, data["month"] as Number);

@@ -67,7 +67,7 @@ class QiblaView extends WatchUi.View {
     }
 
     // Great-circle initial bearing to the Kaaba, degrees clockwise from true north.
-    static function qiblaBearing(lat as Float, lon as Float) as Float {
+    hidden function qiblaBearing(lat as Float, lon as Float) as Float {
         var p1 = Math.toRadians(lat);
         var p2 = Math.toRadians(KAABA_LAT);
         var dl = Math.toRadians(KAABA_LON - lon);

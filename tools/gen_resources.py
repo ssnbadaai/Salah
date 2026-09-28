@@ -75,7 +75,7 @@ def png(path, size, pixel):
         f.write(data)
 
 
-def gen_icon(size=70):
+def gen_icon(size=40):
     c = size / 2
 
     def pixel(x, y):
