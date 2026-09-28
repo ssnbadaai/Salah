@@ -4,19 +4,25 @@ import Toybox.Lang;
 import Toybox.Math;
 import Toybox.PersistedContent;
 import Toybox.Position;
+import Toybox.StringUtil;
 import Toybox.WatchUi;
 
-// Location, city selection and download of MARA timetables (via the phone).
+// Location, city selection and the yearly download of MARA timetables for all
+// cities (via the phone). Cities come in chunks of CHUNK per request; see
+// server/build_site.py.
 class Sync {
+    const CHUNK = 12; // cities per download; must match server/build_site.py
+
     var lat as Float? = null;       // degrees, last known position
     var lon as Float? = null;
     var cityId as Number = 0;
     var cityName as String = "Muscat";
     var cityDistKm as Number = -1;  // -1 when the city was chosen without GPS
-    var status as String? = null;   // shown when today's times aren't cached
+    var status as String? = null;   // shown when today's times aren't downloaded
 
+    hidden var _chunks as Number = 1;
     hidden var _busy as Boolean = false;
-    hidden var _failedKey as String? = null;
+    hidden var _stopped as Boolean = false; // a download failed; retry next time a view opens
 
     function initialize() {
         var loc = Application.Storage.getValue("loc") as Array?;
@@ -29,7 +35,7 @@ class Sync {
 
     // Called when a view is shown: refresh GPS and make sure data is cached.
     function start() as Void {
-        _failedKey = null;
+        _stopped = false;
         var info = Position.getInfo();
         if (info.accuracy != Position.QUALITY_NOT_AVAILABLE) {
             onPosition(info);
@@ -71,6 +77,9 @@ class Sync {
         var bestDist = 0;
         for (var i = 0; i < cities.size(); i++) {
             var c = cities[i] as Array;
+            if ((c[0] as Number) / CHUNK >= _chunks) {
+                _chunks = (c[0] as Number) / CHUNK + 1;
+            }
             if (fixed != null && fixed >= 0) {
                 if (c[0] == fixed) {
                     best = c;
@@ -93,90 +102,106 @@ class Sync {
         Application.Storage.setValue("city", [cityId, cityName, cityDistKm]);
     }
 
-    // Download this month if missing, and next month from the 20th on.
+    // Download this year for every city if anything is missing, and next
+    // year during December. Runs one chunk at a time until all are stored.
     function ensureData() as Void {
         var t = PrayerData.omanInfo(0);
-        var y = t.year as Number;
-        var m = t.month as Number;
-        if (!isCached(y, m)) {
-            request(y, m);
+        var year = t.year as Number;
+        dropYear(year - 1);
+        if (_busy || _stopped) {
             return;
         }
-        status = null;
-        if ((t.day as Number) >= 20) {
-            var ny = m == 12 ? y + 1 : y;
-            var nm = m == 12 ? 1 : m + 1;
-            if (!isCached(ny, nm)) {
-                request(ny, nm);
+        var chunk = missingChunk(year);
+        if (chunk < 0 && (t.month as Number) == 12) {
+            year += 1;
+            chunk = missingChunk(year);
+        }
+        if (chunk < 0) {
+            status = null;
+            return;
+        }
+        request(year, chunk);
+    }
+
+    // First chunk of `year` not yet stored, starting with the current city's; -1 if none.
+    hidden function missingChunk(year as Number) as Number {
+        var done = Application.Storage.getValue("c" + year) as Array?;
+        var own = cityId / CHUNK;
+        if (done == null || done.indexOf(own) < 0) {
+            return own;
+        }
+        for (var i = 0; i < _chunks; i++) {
+            if (done.indexOf(i) < 0) {
+                return i;
             }
         }
+        return -1;
     }
 
-    hidden function isCached(year as Number, month as Number) as Boolean {
-        return Application.Storage.getValue(PrayerData.monthKey(cityId, year, month)) != null;
-    }
-
-    hidden function request(year as Number, month as Number) as Void {
-        var key = PrayerData.monthKey(cityId, year, month);
-        if (_busy || key.equals(_failedKey)) {
-            return;
-        }
+    hidden function request(year as Number, chunk as Number) as Void {
         _busy = true;
         if (PrayerData.dayTimes(cityId, PrayerData.omanInfo(0)) == null) {
-            status = "Syncing...";
+            var done = Application.Storage.getValue("c" + year) as Array?;
+            status = "Downloading " + (done == null ? 1 : done.size() + 1) + "/" + _chunks;
         }
         var base = Application.Properties.getValue("dataUrl") as String;
         while (base.length() > 0 && base.substring(base.length() - 1, base.length()).equals("/")) {
             base = base.substring(0, base.length() - 1);
         }
-        var url = base + "/v1/" + cityId + "/" + year + "-" + month.format("%02d") + ".json";
-        Communications.makeWebRequest(url, null, {
+        Communications.makeWebRequest(base + "/v2/" + year + "/" + chunk + ".json", null, {
             :method => Communications.HTTP_REQUEST_METHOD_GET,
             :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON,
-            :context => key
+            :context => [year, chunk]
         }, method(:onResponse));
     }
 
-    function onResponse(code as Number, data as Dictionary or String or PersistedContent.Iterator or Null, key as Object) as Void {
+    function onResponse(code as Number, data as Dictionary or String or PersistedContent.Iterator or Null, context as Object) as Void {
         _busy = false;
-        if (code == 200 && data instanceof Dictionary && data["days"] instanceof Array) {
-            var got = PrayerData.monthKey(data["city"] as Number, data["year"] as Number, data["month"] as Number);
-            Application.Storage.setValue(got, data["days"]);
-            remember(got, (data["year"] as Number) * 12 + (data["month"] as Number));
-            status = null;
-            ensureData(); // may queue next month
-        } else {
-            _failedKey = key as String;
-            if (PrayerData.dayTimes(cityId, PrayerData.omanInfo(0)) == null) {
-                status = code == Communications.BLE_CONNECTION_UNAVAILABLE
-                    ? "Phone not connected"
-                    : "Sync failed (" + code + ")";
+        var year = (context as Array)[0] as Number;
+        var chunk = (context as Array)[1] as Number;
+        var error = null;
+        if (code == 200 && data instanceof Dictionary && data["cities"] instanceof Array) {
+            var cities = data["cities"] as Array;
+            try {
+                for (var i = 0; i < cities.size(); i++) {
+                    var entry = cities[i] as Array;
+                    var bytes = StringUtil.convertEncodedString(entry[1] as String, {
+                        :fromRepresentation => StringUtil.REPRESENTATION_STRING_BASE64,
+                        :toRepresentation => StringUtil.REPRESENTATION_BYTE_ARRAY
+                    });
+                    Application.Storage.setValue(PrayerData.yearKey(year, entry[0] as Number), bytes as ByteArray);
+                }
+                var done = Application.Storage.getValue("c" + year) as Array?;
+                done = done == null ? [chunk] : done.add(chunk);
+                Application.Storage.setValue("c" + year, done);
+            } catch (ex) {
+                error = "Watch storage full";
             }
-            ensureData(); // the city may have changed meanwhile; failed key isn't retried
+        } else if (code == Communications.BLE_CONNECTION_UNAVAILABLE) {
+            error = "Phone not connected";
+        } else {
+            error = "Download failed (" + code + ")";
+        }
+        if (error != null) {
+            _stopped = true;
+            if (PrayerData.dayTimes(cityId, PrayerData.omanInfo(0)) == null) {
+                status = error;
+            }
+        } else {
+            ensureData(); // next chunk
         }
         WatchUi.requestUpdate();
     }
 
-    // Track cached months and drop those older than the current one.
-    hidden function remember(key as String, monthIndex as Number) as Void {
-        var t = PrayerData.omanInfo(0);
-        var current = (t.year as Number) * 12 + (t.month as Number);
-        var kept = [[key, monthIndex]];
-        var list = Application.Storage.getValue("months") as Array?;
-        if (list != null) {
-            for (var i = 0; i < list.size(); i++) {
-                var e = list[i] as Array;
-                if ((e[0] as String).equals(key)) {
-                    continue;
-                }
-                if ((e[1] as Number) < current) {
-                    Application.Storage.deleteValue(e[0] as String);
-                } else {
-                    kept.add(e);
-                }
-            }
+    // Delete a past year's data once the new year has started.
+    hidden function dropYear(year as Number) as Void {
+        if (Application.Storage.getValue("c" + year) == null) {
+            return;
         }
-        Application.Storage.setValue("months", kept);
+        for (var id = 0; id < _chunks * CHUNK; id++) {
+            Application.Storage.deleteValue(PrayerData.yearKey(year, id));
+        }
+        Application.Storage.deleteValue("c" + year);
     }
 
     static function distanceKm(lat1, lon1, lat2, lon2) as Float {

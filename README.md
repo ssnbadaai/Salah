@@ -5,16 +5,17 @@ Prayer times from Oman's Ministry of Endowments and Religious Affairs
 Garmin Fēnix 7X.
 
 ```
-MARA website ──(daily GitHub Action: server/build_site.py)──► JSON on GitHub Pages
+MARA website ──(monthly GitHub Action: server/build_site.py)──► feed on GitHub Pages
                                                                    │
                                           Garmin Connect app on phone (Bluetooth)
                                                                    ▼
-                                                     Fēnix 7X widget (garmin/)
+                                   Fēnix 7X widget (garmin/), stores a whole year
 ```
 
 Why the extra hop: Connect IQ watches can only read JSON or `text/plain`
 through the phone, and MARA serves an HTML form (`POST year, month, CityID`).
-The scraper turns that table into ~1 KB JSON per city per month.
+The scraper packs each city's whole year into 678 bytes, so the watch can
+hold every MARA city for the year.
 
 ## The watch app (`garmin/`)
 
@@ -28,9 +29,14 @@ The scraper turns that table into ~1 KB JSON per city per month.
   (±5°). The centre shows the Qibla bearing; distance to Makkah is shown below it.
   **BACK** returns.
 
-Times are MARA's (Oman time, UTC+4) regardless of the watch's time zone. The
-current month is downloaded on first open, and next month from the 20th. Both are
-cached, so the app works offline once synced.
+Times are MARA's (Oman time, UTC+4) regardless of the watch's time zone.
+
+**Data on the watch:** on first open the watch downloads the **whole year for all
+86 cities** (~58 KB) in 8 requests, starting with the batch that holds your
+city. From 1 December it downloads next year the same way, and last year's data
+is deleted in January. Between those downloads the app needs no phone or
+internet, including when you travel between cities. The app has to be open while
+it downloads; an interrupted download resumes the next time you open it.
 
 Settings (Garmin Connect app → Connect IQ → Salah → Settings):
 
@@ -62,16 +68,20 @@ scales with screen size.
 
 ## Data feed (`server/`)
 
-`server/build_site.py <outdir>` scrapes the current and next month for all cities
-and writes:
+`server/build_site.py <outdir> [year …]` scrapes every month of this year and
+next (1,032 requests per year) for all cities and writes:
 
-* `v1/<cityId>/<yyyy>-<mm>.json` →
-  `{"v":1,"city":0,"name":"Muscat","year":2026,"month":10,"days":[[fajr,sunrise,dhuhr,asr,maghrib,isha],…]}`
-  with each time in minutes after midnight, 24-hour Oman time. MARA prints a
-  12-hour clock with no AM/PM, so this conversion is done here.
-* `v1/cities.json` → `[[cityId, name], …]`
+* `v2/<year>/<chunk>.json` →
+  `{"v":2,"year":2026,"chunk":0,"cities":[[cityId,"<base64>"],…]}`, 12 cities per
+  chunk (`chunk = cityId // 12`). Each base64 payload is one city's year, packed
+  by [server/codec.py](server/codec.py): day-1 times per month, then each day's
+  change in 2 bits. Every day is checked by decoding it again before writing.
+  MARA prints a 12-hour clock with no AM/PM, so times are converted to 24-hour
+  minutes first.
+* `v2/cities.json` → `[[cityId, name], …]`
 
-`.github/workflows/prayer-data.yml` runs it daily and publishes to GitHub Pages.
+`.github/workflows/prayer-data.yml` runs it on the 1st of each month and
+publishes to GitHub Pages.
 To enable it: **Settings → Pages → Source: GitHub Actions**. On the free GitHub
 plan, Pages needs a **public** repository. Otherwise, host the `site/` folder
 anywhere that serves `application/json` over HTTPS, and point the *Data URL*
