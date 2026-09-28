@@ -1,0 +1,8 @@
+bin/
+garmin/bin/
+garmin/gen/
+*.prg
+*.iq
+developer_key*
+site/
+__pycache__/

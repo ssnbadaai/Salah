@@ -1,0 +1,6 @@
+<properties>
+    <!-- -1 = automatic: the MARA city nearest to the watch's GPS position -->
+    <property id="cityId" type="number">-1</property>
+    <!-- Where server/build_site.py output is hosted (no trailing slash) -->
+    <property id="dataUrl" type="string">https://ssnbadaai.github.io/Salah</property>
+</properties>
